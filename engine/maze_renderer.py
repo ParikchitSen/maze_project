@@ -34,10 +34,19 @@ Design notes (why it's built this way):
   same pixel-mapping helpers, and draw on top of an already-drawn maze
   without recomputing cell_size/margin math themselves or risking it
   drifting out of sync with how the maze itself is drawn.
+- Reads GameState, never writes it. `game_state` is an optional dependency
+  purely for visualization: draw_player() reads `game_state.player_pos`
+  to know where to draw, and does nothing else with it -- no move(),
+  no tick(), no mutation of any kind. Gameplay logic (movement, win
+  detection, timing) stays entirely in GameState/engine/game_state.py.
+  This keeps the dependency arrow one-way: GameState -> MazeRenderer ->
+  Renderer -> OpenGL. MazeRenderer depends on GameState's public
+  read-only interface; GameState has no idea MazeRenderer exists.
 """
 
-from typing import List, Tuple
+from typing import List, Optional, Tuple
 
+from engine.game_state import GameState
 from engine.renderer import Color, Renderer
 from maze.cell import Cell
 
@@ -58,9 +67,20 @@ class MazeRenderer:
         margin_y: int = 20,
         wall_color: Color = (0.9, 0.9, 0.9),
         wall_thickness: float = 2.0,
+        game_state: Optional[GameState] = None,
+        player_color: Color = (0.2, 0.7, 1.0),
+        player_size_ratio: float = 0.6,
+        goal_color: Color = (0.3, 0.85, 0.4),
+        goal_size_ratio: float = 0.6,
     ) -> None:
         if not grid or not grid[0]:
             raise ValueError("grid must be a non-empty 2D list of Cell objects")
+
+        if not (0.0 < player_size_ratio <= 1.0):
+            raise ValueError("player_size_ratio must be in the range (0.0, 1.0]")
+
+        if not (0.0 < goal_size_ratio <= 1.0):
+            raise ValueError("goal_size_ratio must be in the range (0.0, 1.0]")
 
         self.renderer: Renderer = renderer
         self.grid: List[List[Cell]] = grid
@@ -74,6 +94,18 @@ class MazeRenderer:
 
         self.wall_color: Color = wall_color
         self.wall_thickness: float = wall_thickness
+
+        # Optional -- MazeRenderer works exactly as before (walls only) if
+        # no GameState is supplied. Purely a read source for draw_player()/
+        # draw_goal(); never mutated by this class. GameState remains the
+        # single source of truth for both player_pos and goal_pos -- this
+        # class never stores its own copy of either position, it re-reads
+        # game_state on every draw call.
+        self.game_state: Optional[GameState] = game_state
+        self.player_color: Color = player_color
+        self.player_size_ratio: float = player_size_ratio
+        self.goal_color: Color = goal_color
+        self.goal_size_ratio: float = goal_size_ratio
 
     # ------------------------------------------------------------------
     # Pixel-mapping helpers (public, reusable by future overlay renderers)
@@ -175,12 +207,69 @@ class MazeRenderer:
                         color=self.wall_color, line_width=self.wall_thickness,
                     )
 
+    def draw_goal(self) -> None:
+        """
+        Draw the goal as a filled square centered in GameState.goal_pos,
+        via Renderer.draw_rect(). Reads game_state.goal_pos only -- does
+        not store, cache, or mutate it. GameState remains the sole source
+        of truth for where the goal is; this method just visualizes
+        whatever it currently reports. No-op if no game_state was supplied.
+        """
+        if self.game_state is None:
+            return
+
+        row, col = self.game_state.goal_pos
+        cx, cy = self.cell_center(row, col)
+
+        size = self.cell_size * self.goal_size_ratio
+        x = cx - size / 2
+        y = cy - size / 2
+
+        self.renderer.draw_rect(x, y, size, size, color=self.goal_color, filled=True)
+
+    def draw_player(self) -> None:
+        """
+        Draw the player as a filled square centered in their current cell,
+        via Renderer.draw_rect(). Reads game_state.player_pos only -- does
+        not move the player, does not touch move_count/won/elapsed_time,
+        and does not call any GameState methods. If no game_state was
+        supplied to this MazeRenderer, this is a no-op.
+        """
+        if self.game_state is None:
+            return
+
+        row, col = self.game_state.player_pos
+        cx, cy = self.cell_center(row, col)
+
+        size = self.cell_size * self.player_size_ratio
+        x = cx - size / 2
+        y = cy - size / 2
+
+        self.renderer.draw_rect(x, y, size, size, color=self.player_color, filled=True)
+
+    def render(self) -> None:
+        """
+        Convenience: draw the maze, then the goal, then the player on top
+        (if a game_state was supplied). Goal is drawn before the player so
+        that if they ever occupy the same cell (i.e. right at the moment
+        of winning), the player marker is the one left visible. Equivalent
+        to calling draw_maze() + draw_goal() + draw_player() -- provided so
+        callers (e.g. main.py's loop) have a single call site, without
+        draw_maze()'s existing behavior changing for anyone still calling
+        it directly.
+        """
+        self.draw_maze()
+        self.draw_goal()
+        self.draw_player()
+
 
 if __name__ == "__main__":
-    # Standalone smoke test: generate a small maze and visualize it, with
-    # no other project files (config.py, main.py, solver.py, etc.) involved.
-    # If this shows a correctly-connected maze with no stray gaps or double
-    # walls, MazeRenderer is solid.
+    # Standalone smoke test: generate a small maze, wrap it in a GameState,
+    # and visualize both the maze and the player -- with no other project
+    # files (config.py, main.py, input_handler.py, etc.) involved. If this
+    # shows a correctly-connected maze with a filled square sitting in the
+    # top-left cell, wall+player rendering are both solid.
+    from engine.game_state import GameState
     from maze.generator import MazeGenerator
 
     CELL_SIZE = 40
@@ -188,6 +277,7 @@ if __name__ == "__main__":
 
     maze = MazeGenerator(rows=15, cols=15, seed=42)
     maze.generate()
+    game_state = GameState(maze)  # player starts at (0, 0) by default
 
     # Compute the exact window size this maze needs before the Renderer
     # (and its window) is even created -- no dummy/placeholder instance
@@ -203,9 +293,10 @@ if __name__ == "__main__":
             cell_size=CELL_SIZE,
             margin_x=MARGIN,
             margin_y=MARGIN,
+            game_state=game_state,
         )
 
         while not renderer.should_close():
             renderer.begin_frame()
-            maze_renderer.draw_maze()
+            maze_renderer.render()
             renderer.end_frame()

@@ -166,7 +166,21 @@ class GameState:
     # ------------------------------------------------------------------
 
     def _check_win(self) -> None:
+        """
+        Update `won` based on the current player position, and announce the
+        win exactly once -- on the frame it FIRST becomes True, not on every
+        subsequent move() call (movement is blocked after winning anyway,
+        but this guards against ever calling _check_win() again while
+        already won). This lives in GameState, not the renderer, because
+        "you won" is a gameplay fact, not a visual -- the terminal message
+        is just how that fact is surfaced right now, and could just as
+        easily be swapped for something else later without renderer code
+        changing at all.
+        """
+        was_won = self.won
         self.won = self.player_pos == self.goal_pos
+        if self.won and not was_won:
+            print("Maze Completed!")
 
     # ------------------------------------------------------------------
     # Time tracking

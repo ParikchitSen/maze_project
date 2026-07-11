@@ -69,6 +69,28 @@ from OpenGL.GL import (
 # RGB color, each channel in [0.0, 1.0].
 Color = Tuple[float, float, float]
 
+# String key names -> GLFW key constants. Kept private to this module so
+# that callers (e.g. a future input_handler.py) can ask Renderer
+# "is 'UP' pressed?" using plain strings, without ever importing glfw or
+# knowing its constants themselves -- GLFW stays encapsulated entirely
+# inside this file, per the module docstring above.
+_KEY_NAME_MAP = {
+    "UP": glfw.KEY_UP,
+    "DOWN": glfw.KEY_DOWN,
+    "LEFT": glfw.KEY_LEFT,
+    "RIGHT": glfw.KEY_RIGHT,
+    "W": glfw.KEY_W,
+    "A": glfw.KEY_A,
+    "S": glfw.KEY_S,
+    "D": glfw.KEY_D,
+    "R": glfw.KEY_R,
+    "N": glfw.KEY_N,
+    "P": glfw.KEY_P,
+    "ESCAPE": glfw.KEY_ESCAPE,
+    "SPACE": glfw.KEY_SPACE,
+    "ENTER": glfw.KEY_ENTER,
+}
+
 
 class Renderer:
     """
@@ -152,6 +174,37 @@ class Renderer:
     def should_close(self) -> bool:
         """True once the user has requested the window close (e.g. clicked X)."""
         return bool(glfw.window_should_close(self.window))
+
+    def is_key_pressed(self, key_name: str) -> bool:
+        """
+        Return True if the named key is currently held down. Key names are
+        plain strings ('UP', 'DOWN', 'LEFT', 'RIGHT', 'W', 'A', 'S', 'D',
+        'ESCAPE', 'SPACE', 'ENTER') -- callers never need to import glfw or
+        know its key constants; this method is the one place that
+        translates a human-readable name into a GLFW key code.
+        """
+        key = _KEY_NAME_MAP.get(key_name.upper())
+        if key is None:
+            raise ValueError(f"Unknown key name: {key_name!r}")
+        return glfw.get_key(self.window, key) == glfw.PRESS
+
+    def get_time(self) -> float:
+        """
+        Return the number of seconds since GLFW was initialized (a
+        monotonic clock). Exposed so callers (e.g. main.py's loop) can
+        compute a frame's dt for time-based updates -- like
+        GameState.tick(dt) -- without importing glfw themselves.
+        """
+        return glfw.get_time()
+
+    def set_title(self, title: str) -> None:
+        """
+        Change the window's title bar text. Exposed specifically so
+        callers can show live info (move count, elapsed time, etc.) in the
+        title bar without this project needing a text-rendering/font
+        library yet -- the OS-drawn title bar is "free" text rendering.
+        """
+        glfw.set_window_title(self.window, title)
 
     def begin_frame(self) -> None:
         """Clear the screen with the configured background color."""
