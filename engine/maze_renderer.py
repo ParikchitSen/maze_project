@@ -74,8 +74,13 @@ class MazeRenderer:
         cell_size: int = 40,
         margin_x: int = 20,
         margin_y: int = 20,
-        wall_color: Color = (0.9, 0.9, 0.9),
-        wall_thickness: float = 4.0,
+        wall_color: Color = (0.78, 0.66, 0.48),
+        wall_thickness: float = 8.0,
+        wall_outline_color: Color = (0.30, 0.22, 0.14),
+        wall_outline_thickness: float = 1.5,
+        wall_highlight_strength: float = 0.18,
+        wall_shadow_strength: float = 0.18,
+        wall_lighting_thickness: float = 2.0,
         game_state: Optional[GameState] = None,
         player_color: Color = (0.2, 0.7, 1.0),
         player_size_ratio: float = 0.6,
@@ -102,8 +107,21 @@ class MazeRenderer:
         self.margin_x: int = margin_x
         self.margin_y: int = margin_y
 
+        # Base wall styling. wall_color is the flat "stone" fill color;
+        # everything else here is what turns a flat rectangle into a
+        # small stone block -- see _draw_wall_segment().
         self.wall_color: Color = wall_color
         self.wall_thickness: float = wall_thickness
+        self.wall_outline_color: Color = wall_outline_color
+        self.wall_outline_thickness: float = wall_outline_thickness
+        self.wall_lighting_thickness: float = wall_lighting_thickness
+
+        # Precomputed brighter/darker shades of wall_color, used for the
+        # simple top-lit/bottom-shadowed banding. Computed once here
+        # rather than every frame since wall_color doesn't change after
+        # construction.
+        self._wall_light_color: Color = self._shade(wall_color, 1.0 + wall_highlight_strength)
+        self._wall_dark_color: Color = self._shade(wall_color, 1.0 - wall_shadow_strength)
 
         # Optional -- MazeRenderer works exactly as before (walls only) if
         # no GameState is supplied. Purely a read source for draw_player()/
@@ -131,6 +149,11 @@ class MazeRenderer:
         # this needs, GameState is never touched to produce it.
         self._last_player_pos: Optional[Tuple[int, int]] = None
         self._walk_frame: int = 0
+
+    @staticmethod
+    def _shade(color: Color, factor: float) -> Color:
+        """Multiply each channel of `color` by `factor`, clamped to [0, 1]."""
+        return tuple(min(1.0, max(0.0, c * factor)) for c in color)  # type: ignore[return-value]
 
     # ------------------------------------------------------------------
     # Pixel-mapping helpers (public, reusable by future overlay renderers)
@@ -247,20 +270,22 @@ class MazeRenderer:
 
     def draw_maze(self) -> None:
         """
-        Draw every standing wall in the maze as a FILLED RECTANGLE, via
-        Renderer.draw_rect() -- not a line primitive. Call this once per
-        frame, between Renderer.begin_frame() and Renderer.end_frame().
+        Draw every standing wall in the maze as a small stone-styled
+        block (outline + lit fill), via _draw_wall_segment() -- not a line
+        primitive, and not a single flat draw_rect() either anymore (see
+        that method). Call this once per frame, between
+        Renderer.begin_frame() and Renderer.end_frame().
 
-        Each wall rectangle is extended by half the wall thickness at both
-        ends beyond the cell's edge length. This is what keeps corners
-        pixel-perfect: a horizontal wall's rectangle and a vertical wall's
-        rectangle that meet at a cell corner both reach into that same
-        (thickness x thickness) corner square, so they overlap exactly
-        there instead of leaving a gap or a corner that's only half-covered.
-        Since both are filled with the same solid wall_color, the overlap
-        is invisible -- it just reads as one continuous, mitered-looking
-        wall, regardless of which neighboring cell's draw call happened to
-        produce which segment.
+        The bounding box computed for each wall segment here is UNCHANGED
+        from before this visual restyling: each rectangle is still
+        extended by half the wall thickness at both ends beyond the cell's
+        edge length. This is what keeps corners pixel-perfect -- a
+        horizontal wall's box and a vertical wall's box that meet at a
+        cell corner both reach into that same (thickness x thickness)
+        corner square and overlap there exactly, rather than leaving a gap
+        or a half-covered corner. All maze geometry (which walls exist,
+        where their segments sit) is exactly as before; only how a segment
+        is painted, in _draw_wall_segment(), has changed.
         """
         t = self.wall_thickness
         half_t = t / 2
@@ -273,30 +298,62 @@ class MazeRenderer:
 
                 # Every cell draws its own N and W walls unconditionally.
                 if cell.has_wall("N"):
-                    self.renderer.draw_rect(
-                        x - half_t, y - half_t, size + t, t,
-                        color=self.wall_color, filled=True,
-                    )
+                    self._draw_wall_segment(x - half_t, y - half_t, size + t, t)
                 if cell.has_wall("W"):
-                    self.renderer.draw_rect(
-                        x - half_t, y - half_t, t, size + t,
-                        color=self.wall_color, filled=True,
-                    )
+                    self._draw_wall_segment(x - half_t, y - half_t, t, size + t)
 
                 # S and E walls are only drawn from the last row / last
                 # column -- every other S/E wall is already covered by the
                 # N/W wall of the neighboring cell (remove_wall guarantees
                 # both sides always agree, so this never misses a wall).
                 if row == self.rows - 1 and cell.has_wall("S"):
-                    self.renderer.draw_rect(
-                        x - half_t, y + size - half_t, size + t, t,
-                        color=self.wall_color, filled=True,
-                    )
+                    self._draw_wall_segment(x - half_t, y + size - half_t, size + t, t)
                 if col == self.cols - 1 and cell.has_wall("E"):
-                    self.renderer.draw_rect(
-                        x + size - half_t, y - half_t, t, size + t,
-                        color=self.wall_color, filled=True,
-                    )
+                    self._draw_wall_segment(x + size - half_t, y - half_t, t, size + t)
+
+    def _draw_wall_segment(self, x: float, y: float, w: float, h: float) -> None:
+        """
+        Render ONE wall segment's bounding box (x, y, w, h) as a small
+        stone block: a darker outline, then a warm stone-colored fill with
+        a brighter top band and a darker bottom band -- built entirely out
+        of flat Renderer.draw_rect() calls (no gradients, no textures).
+
+        Deliberately isolated from draw_maze()'s geometry/looping logic:
+        draw_maze() only ever computes WHERE a wall segment's box is; this
+        method is the ONLY place that decides HOW that box gets painted.
+        That split is what makes future texture support easy to add later
+        -- swapping this method's internals for a textured quad (e.g.
+        drawing a stone texture instead of these flat rectangles) would
+        require zero changes to draw_maze() or to any wall-position/corner
+        logic, since the bounding box passed in stays exactly the same.
+
+        The outline is drawn first as a slightly larger rectangle behind
+        the fill -- since neighboring wall segments' boxes already overlap
+        seamlessly at corners (see draw_maze()), their outlines overlap
+        there too, so corners still read as solid, continuous stone with
+        no gaps.
+        """
+        outline = self.wall_outline_thickness
+        self.renderer.draw_rect(
+            x - outline, y - outline, w + 2 * outline, h + 2 * outline,
+            color=self.wall_outline_color, filled=True,
+        )
+
+        # Simple top-lit/bottom-shadowed banding: a brighter strip along
+        # the top edge, a darker strip along the bottom edge, and the
+        # plain base color filling the middle. Applied by absolute
+        # position (not by the wall's own orientation), so both
+        # horizontal and vertical wall segments read as lit from above --
+        # consistent, and simple to reason about. Band thickness is
+        # clamped so it never exceeds the segment's own height (relevant
+        # for thin horizontal walls where h == wall_thickness).
+        band = min(self.wall_lighting_thickness, h / 2)
+        mid_h = h - 2 * band
+
+        self.renderer.draw_rect(x, y, w, band, color=self._wall_light_color, filled=True)
+        if mid_h > 0:
+            self.renderer.draw_rect(x, y + band, w, mid_h, color=self.wall_color, filled=True)
+        self.renderer.draw_rect(x, y + h - band, w, band, color=self._wall_dark_color, filled=True)
 
     def draw_goal(self) -> None:
         """
