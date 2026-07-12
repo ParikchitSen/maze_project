@@ -12,22 +12,31 @@ Design notes (why it's built this way):
   (all-walls-up) grid, it will happily draw that too -- it has no opinion
   on how the grid came to be.
 - No direct OpenGL calls. Every pixel drawn goes through
-  `self.renderer.draw_line(...)`. This keeps the "how do I talk to the
-  GPU" knowledge confined to Renderer, and this file only ever reasons
-  about maze geometry (rows/cols/cell_size/margins) and Cell wall state.
-  If Renderer's backend ever changes (fixed-function -> shaders, or a
-  different windowing library entirely), MazeRenderer would need zero
-  changes as long as draw_line()'s signature stays the same.
+  `self.renderer.draw_rect(...)` (walls, goal, player -- everything in
+  this file is a filled rectangle now, no line primitives). This keeps the
+  "how do I talk to the GPU" knowledge confined to Renderer, and this file
+  only ever reasons about maze geometry (rows/cols/cell_size/margins) and
+  Cell wall state. If Renderer's backend ever changes (fixed-function ->
+  shaders, or a different windowing library entirely), MazeRenderer would
+  need zero changes as long as draw_rect()'s signature stays the same.
+- Walls are filled rectangles, not lines. Each standing wall becomes a
+  thin filled rectangle, `wall_thickness` pixels wide/tall (configured in
+  config.py). Every wall rectangle is extended by half the thickness at
+  both ends beyond the cell edge -- this is what keeps corners
+  pixel-perfect: two perpendicular wall rectangles meeting at a cell
+  corner both reach into that same small corner square and overlap there
+  exactly, rather than leaving a gap or a half-covered corner. Since both
+  are filled with the same solid color, the overlap is invisible.
 - No duplicated generation logic. Row/col -> Cell lookups, wall checks
   (`cell.has_wall(...)`), and dimensions all come from the grid itself
   (via len()) -- this file does not reimplement anything from
   maze/generator.py or maze/cell.py, it only reads from Cell's public
   interface (`has_wall`).
-- One wall, one line. Every standing wall in the maze is drawn exactly
+- One wall, one rectangle. Every standing wall in the maze is drawn exactly
   once: each cell draws its own N and W walls; only cells in the last row
   / last column additionally draw their S / E walls. Since remove_wall()
   guarantees both sides of a shared wall always agree, this covers every
-  wall in the maze with no duplicate (overlapping) line draws.
+  wall in the maze with no duplicate (overlapping) rectangle draws.
 - Built for reuse by later layers. `cell_to_pixel()`, `cell_rect()`, and
   `cell_center()` are public on purpose: a future PlayerRenderer,
   GoalRenderer, or SolverPathRenderer can import MazeRenderer, reuse these
@@ -66,7 +75,7 @@ class MazeRenderer:
         margin_x: int = 20,
         margin_y: int = 20,
         wall_color: Color = (0.9, 0.9, 0.9),
-        wall_thickness: float = 2.0,
+        wall_thickness: float = 4.0,
         game_state: Optional[GameState] = None,
         player_color: Color = (0.2, 0.7, 1.0),
         player_size_ratio: float = 0.6,
@@ -106,6 +115,14 @@ class MazeRenderer:
         self.player_size_ratio: float = player_size_ratio
         self.goal_color: Color = goal_color
         self.goal_size_ratio: float = goal_size_ratio
+
+        # Walk-animation bookkeeping -- purely visual state, not gameplay
+        # state, so it lives here rather than on GameState. Tracks the
+        # player's position as of the LAST draw call so we can detect "did
+        # they just move" and flip to the other stride pose; that's all
+        # this needs, GameState is never touched to produce it.
+        self._last_player_pos: Optional[Tuple[int, int]] = None
+        self._walk_frame: int = 0
 
     # ------------------------------------------------------------------
     # Pixel-mapping helpers (public, reusable by future overlay renderers)
@@ -170,10 +187,24 @@ class MazeRenderer:
 
     def draw_maze(self) -> None:
         """
-        Draw every standing wall in the maze as a line segment, via
-        Renderer.draw_line(). Call this once per frame, between
-        Renderer.begin_frame() and Renderer.end_frame().
+        Draw every standing wall in the maze as a FILLED RECTANGLE, via
+        Renderer.draw_rect() -- not a line primitive. Call this once per
+        frame, between Renderer.begin_frame() and Renderer.end_frame().
+
+        Each wall rectangle is extended by half the wall thickness at both
+        ends beyond the cell's edge length. This is what keeps corners
+        pixel-perfect: a horizontal wall's rectangle and a vertical wall's
+        rectangle that meet at a cell corner both reach into that same
+        (thickness x thickness) corner square, so they overlap exactly
+        there instead of leaving a gap or a corner that's only half-covered.
+        Since both are filled with the same solid wall_color, the overlap
+        is invisible -- it just reads as one continuous, mitered-looking
+        wall, regardless of which neighboring cell's draw call happened to
+        produce which segment.
         """
+        t = self.wall_thickness
+        half_t = t / 2
+
         for row in range(self.rows):
             for col in range(self.cols):
                 cell = self.grid[row][col]
@@ -182,14 +213,14 @@ class MazeRenderer:
 
                 # Every cell draws its own N and W walls unconditionally.
                 if cell.has_wall("N"):
-                    self.renderer.draw_line(
-                        x, y, x + size, y,
-                        color=self.wall_color, line_width=self.wall_thickness,
+                    self.renderer.draw_rect(
+                        x - half_t, y - half_t, size + t, t,
+                        color=self.wall_color, filled=True,
                     )
                 if cell.has_wall("W"):
-                    self.renderer.draw_line(
-                        x, y, x, y + size,
-                        color=self.wall_color, line_width=self.wall_thickness,
+                    self.renderer.draw_rect(
+                        x - half_t, y - half_t, t, size + t,
+                        color=self.wall_color, filled=True,
                     )
 
                 # S and E walls are only drawn from the last row / last
@@ -197,14 +228,14 @@ class MazeRenderer:
                 # N/W wall of the neighboring cell (remove_wall guarantees
                 # both sides always agree, so this never misses a wall).
                 if row == self.rows - 1 and cell.has_wall("S"):
-                    self.renderer.draw_line(
-                        x, y + size, x + size, y + size,
-                        color=self.wall_color, line_width=self.wall_thickness,
+                    self.renderer.draw_rect(
+                        x - half_t, y + size - half_t, size + t, t,
+                        color=self.wall_color, filled=True,
                     )
                 if col == self.cols - 1 and cell.has_wall("E"):
-                    self.renderer.draw_line(
-                        x + size, y, x + size, y + size,
-                        color=self.wall_color, line_width=self.wall_thickness,
+                    self.renderer.draw_rect(
+                        x + size - half_t, y - half_t, t, size + t,
+                        color=self.wall_color, filled=True,
                     )
 
     def draw_goal(self) -> None:
@@ -229,23 +260,78 @@ class MazeRenderer:
 
     def draw_player(self) -> None:
         """
-        Draw the player as a filled square centered in their current cell,
-        via Renderer.draw_rect(). Reads game_state.player_pos only -- does
-        not move the player, does not touch move_count/won/elapsed_time,
-        and does not call any GameState methods. If no game_state was
-        supplied to this MazeRenderer, this is a no-op.
+        Draw the player as a small humanoid figure (head, body, arms, legs)
+        centered in their current cell, built entirely out of
+        Renderer.draw_rect()/draw_line() calls -- no textures, no new
+        rendering primitives. Reads game_state.player_pos only -- does not
+        move the player, does not touch move_count/won/elapsed_time, and
+        does not call any GameState methods. If no game_state was supplied
+        to this MazeRenderer, this is a no-op.
+
+        Between two poses (arms/legs swapped side to side) each time the
+        player's cell actually changes since the last draw call, giving a
+        simple walking-step look on every move. This animation state
+        (_last_player_pos/_walk_frame) is purely visual bookkeeping local
+        to this renderer -- it is never written back to GameState.
         """
         if self.game_state is None:
             return
 
         row, col = self.game_state.player_pos
+        pos = (row, col)
+        if pos != self._last_player_pos:
+            self._walk_frame = 1 - self._walk_frame  # flip stride pose
+            self._last_player_pos = pos
+
         cx, cy = self.cell_center(row, col)
-
         size = self.cell_size * self.player_size_ratio
-        x = cx - size / 2
-        y = cy - size / 2
+        self._draw_person(cx, cy, size, self.player_color, self._walk_frame)
 
-        self.renderer.draw_rect(x, y, size, size, color=self.player_color, filled=True)
+    def _draw_person(
+        self, cx: float, cy: float, size: float, color: Color, walk_frame: int
+    ) -> None:
+        """
+        Draw a simple stick-figure person centered at (cx, cy), scaled to
+        `size`, in the given color. `walk_frame` (0 or 1) picks which of
+        two mirrored stride poses to draw -- arms and legs swap sides
+        between the two, which is what reads as "taking a step" across
+        consecutive moves.
+        """
+        limb_width = max(1.5, size * 0.08)
+
+        # Head: a small filled square at the top of the figure.
+        head_size = size * 0.32
+        head_cy = cy - size * 0.34
+        self.renderer.draw_rect(
+            cx - head_size / 2, head_cy - head_size / 2, head_size, head_size,
+            color=color, filled=True,
+        )
+
+        # Body: a single vertical line from the neck down to the hips.
+        neck_y = head_cy + head_size / 2
+        hip_y = cy + size * 0.12
+        self.renderer.draw_line(cx, neck_y, cx, hip_y, color=color, line_width=limb_width)
+
+        # Arms and legs swing to opposite sides between the two stride
+        # poses -- swap sign of the spread each time walk_frame flips.
+        spread = size * 0.26 if walk_frame == 0 else -size * 0.26
+
+        shoulder_y = neck_y + size * 0.05
+        hand_y = cy + size * 0.05
+        self.renderer.draw_line(
+            cx, shoulder_y, cx - spread, hand_y, color=color, line_width=limb_width,
+        )
+        self.renderer.draw_line(
+            cx, shoulder_y, cx + spread, hand_y, color=color, line_width=limb_width,
+        )
+
+        foot_y = cy + size * 0.42
+        self.renderer.draw_line(
+            cx, hip_y, cx + spread, foot_y, color=color, line_width=limb_width,
+        )
+        self.renderer.draw_line(
+            cx, hip_y, cx - spread, foot_y, color=color, line_width=limb_width,
+        )
 
     def render(self) -> None:
         """

@@ -45,6 +45,7 @@ from engine.input_handler import InputHandler
 from engine.maze_renderer import MazeRenderer
 from engine.renderer import Renderer
 from maze.generator import MazeGenerator
+from config import WALL_THICKNESS
 
 # Maze configuration. Swap these for config.py / CLI args later without
 # touching anything below. SEED=None means a new layout every time a maze
@@ -95,6 +96,7 @@ def main() -> None:
             margin_x=MARGIN_X,
             margin_y=MARGIN_Y,
             game_state=game_state,
+            wall_thickness=WALL_THICKNESS,
         )
 
         # 4. Input: translates key presses into game_state.move() calls,
@@ -139,7 +141,7 @@ def main() -> None:
             status = " -- Solved! Press R to play again" if game_state.won else ""
             renderer.set_title(
                 f"{WINDOW_TITLE} | Moves: {game_state.move_count} | "
-                f"Time: {game_state.elapsed_time:.1f}s{status}"
+                f"Time: {int(game_state.elapsed_time)}s{status}"
             )
 
             # (4) Swap buffers and poll events.

@@ -188,10 +188,15 @@ class GameState:
 
     def tick(self, dt: float) -> None:
         """
-        Advance the elapsed-time placeholder by `dt` seconds. main.py owns
-        deciding where dt comes from (GLFW's clock, a fixed timestep,
-        etc.) -- GameState just accumulates whatever it's given.
+        Advance the elapsed-time placeholder by `dt` seconds. No-ops once
+        the game has been won, so elapsed_time freezes at the moment of
+        completion instead of continuing to climb on the win screen --
+        the same "stop progressing once won" rule move() already follows.
+        main.py owns deciding where dt comes from (GLFW's clock, a fixed
+        timestep, etc.) -- GameState just accumulates whatever it's given.
         """
+        if self.won:
+            return
         self.elapsed_time += dt
 
     def __repr__(self) -> str:
