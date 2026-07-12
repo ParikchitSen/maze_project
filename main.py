@@ -45,7 +45,7 @@ from engine.input_handler import InputHandler
 from engine.maze_renderer import MazeRenderer
 from engine.renderer import Renderer
 from maze.generator import MazeGenerator
-from config import WALL_THICKNESS
+from config import WALL_THICKNESS, FLOOR_COLOR
 
 # Maze configuration. Swap these for config.py / CLI args later without
 # touching anything below. SEED=None means a new layout every time a maze
@@ -97,6 +97,7 @@ def main() -> None:
             margin_y=MARGIN_Y,
             game_state=game_state,
             wall_thickness=WALL_THICKNESS,
+            floor_color=FLOOR_COLOR,
         )
 
         # 4. Input: translates key presses into game_state.move() calls,

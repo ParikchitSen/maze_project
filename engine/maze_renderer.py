@@ -81,6 +81,7 @@ class MazeRenderer:
         player_size_ratio: float = 0.6,
         goal_color: Color = (0.3, 0.85, 0.4),
         goal_size_ratio: float = 0.6,
+        floor_color: Color = (0.13, 0.13, 0.17),
     ) -> None:
         if not grid or not grid[0]:
             raise ValueError("grid must be a non-empty 2D list of Cell objects")
@@ -115,6 +116,13 @@ class MazeRenderer:
         self.player_size_ratio: float = player_size_ratio
         self.goal_color: Color = goal_color
         self.goal_size_ratio: float = goal_size_ratio
+
+        # Floor tile: purely decorative background, drawn beneath
+        # everything else. No GameState involvement at all -- it's a
+        # static property of the grid's dimensions, not gameplay. No
+        # margin/inset anymore -- tiles are sized to cell_size exactly so
+        # neighboring tiles touch with zero gap (see draw_floor()).
+        self.floor_color: Color = floor_color
 
         # Walk-animation bookkeeping -- purely visual state, not gameplay
         # state, so it lives here rather than on GameState. Tracks the
@@ -184,6 +192,58 @@ class MazeRenderer:
     # ------------------------------------------------------------------
     # Drawing
     # ------------------------------------------------------------------
+
+    def draw_floor(self) -> None:
+        """
+        Draw a floor tile filling every maze cell exactly, via
+        Renderer.draw_rect() -- one flat-colored rectangle per cell, sized
+        to cell_size with NO inset, so each tile's edge lands exactly on
+        its neighbor's edge and they touch with zero gap between them.
+        Each tile's color is floor_color shifted by a small, deterministic
+        per-cell brightness offset (see _floor_tile_color) -- a subtle
+        mottled stone/concrete look using only flat procedural colors, no
+        gradients (no per-vertex color interpolation) and no textures.
+        Purely decorative background: reads nothing from GameState, has no
+        notion of walls/paths/visited cells, and does not affect gameplay
+        in any way. Call this BEFORE draw_maze() (see render()) so walls,
+        goal, and player all draw on top of it.
+        """
+        for row in range(self.rows):
+            for col in range(self.cols):
+                x, y = self.cell_to_pixel(row, col)
+                tile_color = self._floor_tile_color(row, col)
+                self.renderer.draw_rect(
+                    x, y, self.cell_size, self.cell_size,
+                    color=tile_color, filled=True,
+                )
+
+    def _floor_tile_color(self, row: int, col: int) -> Color:
+        """
+        Compute this cell's floor color: floor_color shifted by a small
+        (+/-5%) brightness offset that is DETERMINISTIC in (row, col) --
+        not re-randomized per frame, and not stored as per-cell state
+        either (cheap enough to just recompute from the coordinates every
+        time). This is what gives the floor a subtle stone/concrete-like
+        variation instead of one perfectly uniform flat slab, while
+        keeping every individual tile a single flat color (no gradient
+        within a tile, no per-vertex interpolation, no texture sampling)
+        -- efficient, and stable across frames and restarts since it only
+        depends on the tile's position, not on any randomness or on which
+        maze happens to be loaded.
+
+        The hash below is arbitrary but fixed; any deterministic
+        row/col -> [0, 1) mapping would do the same job.
+        """
+        h = (row * 928371 + col * 6291469 + 12345) % 1000
+        fraction = h / 1000.0            # deterministic value in [0, 1)
+        offset = (fraction - 0.5) * 0.10  # maps to [-0.05, +0.05], i.e. +/-5%
+
+        r, g, b = self.floor_color
+        return (
+            min(1.0, max(0.0, r + offset)),
+            min(1.0, max(0.0, g + offset)),
+            min(1.0, max(0.0, b + offset)),
+        )
 
     def draw_maze(self) -> None:
         """
@@ -335,15 +395,18 @@ class MazeRenderer:
 
     def render(self) -> None:
         """
-        Convenience: draw the maze, then the goal, then the player on top
-        (if a game_state was supplied). Goal is drawn before the player so
-        that if they ever occupy the same cell (i.e. right at the moment
-        of winning), the player marker is the one left visible. Equivalent
-        to calling draw_maze() + draw_goal() + draw_player() -- provided so
-        callers (e.g. main.py's loop) have a single call site, without
-        draw_maze()'s existing behavior changing for anyone still calling
-        it directly.
+        Convenience: draw the floor, then the maze walls, then the goal,
+        then the player on top (if a game_state was supplied). Floor is
+        drawn first since it's the background everything else sits on;
+        goal is drawn before the player so that if they ever occupy the
+        same cell (i.e. right at the moment of winning), the player marker
+        is the one left visible. Equivalent to calling draw_floor() +
+        draw_maze() + draw_goal() + draw_player() -- provided so callers
+        (e.g. main.py's loop) have a single call site, without any of the
+        individual draw_*() methods' existing behavior changing for
+        anyone still calling them directly.
         """
+        self.draw_floor()
         self.draw_maze()
         self.draw_goal()
         self.draw_player()
