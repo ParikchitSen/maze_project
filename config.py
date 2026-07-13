@@ -40,3 +40,10 @@ WALL_LIGHTING_THICKNESS: float = 2.0
 # brightness variation on top of this base color for a subtle stone/
 # concrete look.
 FLOOR_COLOR: tuple = (0.13, 0.13, 0.17)
+
+# Minimum seconds between successive successful player moves while a
+# direction key (arrow or WASD) is held down. 0.10-0.15 reads as one
+# deliberate step per "tick" instead of a flood of moves every rendered
+# frame; InputHandler is what actually enforces this, using
+# Renderer.get_time() -- this is just the tunable value.
+MOVE_REPEAT_DELAY: float = 0.12

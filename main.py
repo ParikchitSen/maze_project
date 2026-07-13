@@ -54,6 +54,7 @@ from config import (
     WALL_SHADOW_STRENGTH,
     WALL_LIGHTING_THICKNESS,
     FLOOR_COLOR,
+    MOVE_REPEAT_DELAY,
 )
 
 # Maze configuration. Swap these for config.py / CLI args later without
@@ -118,7 +119,7 @@ def main() -> None:
         # 4. Input: translates key presses into game_state.move() calls,
         # and separately reports restart requests. Built once and reused
         # across restarts (see design notes above).
-        input_handler = InputHandler(renderer, game_state)
+        input_handler = InputHandler(renderer, game_state, move_repeat_delay=MOVE_REPEAT_DELAY)
 
         # 5. Main loop, until the window closes. Runs continuously through
         # a win (movement simply becomes a no-op once won -- see
