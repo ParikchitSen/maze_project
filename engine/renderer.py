@@ -35,6 +35,19 @@ Design notes (why it's built this way):
 - Context-manager support (__enter__/__exit__) is provided so callers can
   use `with Renderer(...) as r:` and always clean up the GLFW window/context
   even if an exception happens mid-loop.
+- Fullscreen uses GLFW's proper API, not window recreation.
+  toggle_fullscreen() calls glfw.set_window_monitor() on the SAME window
+  handle -- it never destroys/recreates the window or the GL context, so
+  no textures, GL state, or the window's identity are ever lost across the
+  switch. Windowed-mode position/size are remembered on the instance
+  (self._windowed_pos/_windowed_size) so returning from fullscreen restores
+  exactly where the window was, rather than resetting to some default.
+- Resize is handled by ONE mechanism, used for every size change. Whether
+  the size change comes from toggle_fullscreen(), the user dragging an
+  edge, or the OS itself, the same _apply_viewport_and_projection() runs
+  and self.width/self.height get resynced from the real framebuffer size
+  (not the requested size) -- so callers (MazeRenderer) always see
+  Renderer's current, correct dimensions, however the window got there.
 """
 
 from typing import Optional, Tuple
@@ -86,6 +99,7 @@ _KEY_NAME_MAP = {
     "R": glfw.KEY_R,
     "N": glfw.KEY_N,
     "P": glfw.KEY_P,
+    "F11": glfw.KEY_F11,
     "ESCAPE": glfw.KEY_ESCAPE,
     "SPACE": glfw.KEY_SPACE,
     "ENTER": glfw.KEY_ENTER,
@@ -115,6 +129,17 @@ class Renderer:
         # Python type.
         self.window: Optional[object] = None
 
+        # Fullscreen state. _windowed_pos/_windowed_size remember the
+        # window's windowed-mode geometry so toggle_fullscreen() can
+        # restore it exactly when returning from fullscreen -- captured
+        # fresh each time we ENTER fullscreen (see toggle_fullscreen()),
+        # and initialized here to the window's starting position/size so
+        # there's always something sane to restore even if F11 is the
+        # very first thing pressed.
+        self._is_fullscreen: bool = False
+        self._windowed_pos: Tuple[int, int] = (0, 0)
+        self._windowed_size: Tuple[int, int] = (width, height)
+
         self._init_glfw()
         self._init_window()
         self._init_gl()
@@ -133,10 +158,14 @@ class Renderer:
         # reject those calls.
         glfw.window_hint(glfw.CONTEXT_VERSION_MAJOR, 2)
         glfw.window_hint(glfw.CONTEXT_VERSION_MINOR, 1)
-        glfw.window_hint(glfw.RESIZABLE, glfw.FALSE)
+
+        # Resizable, so both user drag-resize AND the fullscreen toggle
+        # (which resizes the same window rather than replacing it) work.
+        glfw.window_hint(glfw.RESIZABLE, glfw.TRUE)
 
     def _init_window(self) -> None:
-        """Create the window and make its GL context current."""
+        """Create the window, make its GL context current, and remember
+        its starting geometry + register the resize callback."""
         self.window = glfw.create_window(
             self.width, self.height, self.title, None, None
         )
@@ -147,10 +176,40 @@ class Renderer:
         glfw.make_context_current(self.window)
         glfw.swap_interval(1)  # enable vsync
 
-    def _init_gl(self) -> None:
+        # Renderer's width/height must reflect the real FRAMEBUFFER size
+        # (pixels), not the requested window size (screen coordinates) --
+        # these can differ on HiDPI/Retina displays. Everything this class
+        # draws is in pixel coordinates, so framebuffer size is what
+        # matters for glViewport/glOrtho and for anything (MazeRenderer)
+        # that reads self.width/self.height.
+        fb_width, fb_height = glfw.get_framebuffer_size(self.window)
+        self.width, self.height = fb_width, fb_height
+        self._windowed_size = (fb_width, fb_height)
+        self._windowed_pos = glfw.get_window_pos(self.window)
+
+        # ONE callback handles every resize, regardless of cause (user
+        # drag, OS action, or toggle_fullscreen()'s own set_window_monitor
+        # call) -- so there is a single, always-correct path that keeps
+        # self.width/self.height and the GL viewport/projection in sync,
+        # rather than several call sites each trying to update them.
+        glfw.set_framebuffer_size_callback(self.window, self._on_framebuffer_resize)
+
+    def _on_framebuffer_resize(self, window: object, width: int, height: int) -> None:
+        """GLFW callback: fired whenever the framebuffer size changes, for
+        any reason. Resyncs Renderer's dimensions and the GL viewport/
+        projection so they're never stale relative to the real window."""
+        self.width, self.height = width, height
+        self._apply_viewport_and_projection()
+
+    def _apply_viewport_and_projection(self) -> None:
         """
         Set up an orthographic 2D projection matching pixel coordinates,
-        with (0, 0) at the top-left and y increasing downward.
+        with (0, 0) at the top-left and y increasing downward, sized to
+        self.width/self.height. Called once at startup (_init_gl) and
+        again every time the framebuffer size changes (see
+        _on_framebuffer_resize) -- pulled out into its own method
+        specifically so both call sites share one implementation instead
+        of the projection math being duplicated.
         """
         glViewport(0, 0, self.width, self.height)
 
@@ -160,6 +219,13 @@ class Renderer:
 
         glMatrixMode(GL_MODELVIEW)
         glLoadIdentity()
+
+    def _init_gl(self) -> None:
+        """One-time GL setup: the initial viewport/projection, plus
+        alpha blending (not resize-dependent, so it lives here rather
+        than in _apply_viewport_and_projection, which reruns on every
+        resize)."""
+        self._apply_viewport_and_projection()
 
         # Alpha blending, so draw_line/draw_rect calls can use translucent
         # colors later (e.g. highlighting a solver path) without every
@@ -205,6 +271,60 @@ class Renderer:
         library yet -- the OS-drawn title bar is "free" text rendering.
         """
         glfw.set_window_title(self.window, title)
+
+    @property
+    def is_fullscreen(self) -> bool:
+        """True if the window is currently fullscreen."""
+        return self._is_fullscreen
+
+    def toggle_fullscreen(self) -> None:
+        """
+        Toggle between windowed and fullscreen mode on the SAME window,
+        using glfw.set_window_monitor() -- never destroying/recreating the
+        window, so the GL context (and everything tied to it) is preserved
+        across the switch, exactly as required.
+
+        Entering fullscreen: remembers the current windowed position/size
+        (so it can be restored later), then hands the window to the
+        primary monitor at that monitor's current video mode -- native
+        resolution and refresh rate, not a hardcoded size.
+
+        Returning to windowed: hands the window back with monitor=None,
+        using the exact position/size that were remembered when fullscreen
+        was entered -- so the window reappears exactly where it was, not
+        at some default location.
+
+        Either way, self.width/self.height and the GL viewport/projection
+        get updated via the SAME path as any other resize
+        (_on_framebuffer_resize / _apply_viewport_and_projection) -- this
+        method doesn't duplicate that logic, it just triggers it and
+        (defensively) re-applies it immediately after, since GLFW does not
+        guarantee the resize callback fires synchronously before the next
+        poll_events().
+        """
+        if self._is_fullscreen:
+            x, y = self._windowed_pos
+            w, h = self._windowed_size
+            glfw.set_window_monitor(self.window, None, x, y, w, h, glfw.DONT_CARE)
+            self._is_fullscreen = False
+        else:
+            # Remember exactly where the window was, so windowed mode can
+            # be restored precisely later.
+            self._windowed_pos = glfw.get_window_pos(self.window)
+            self._windowed_size = glfw.get_window_size(self.window)
+
+            monitor = glfw.get_primary_monitor()
+            mode = glfw.get_video_mode(monitor)
+            glfw.set_window_monitor(
+                self.window, monitor, 0, 0,
+                mode.size.width, mode.size.height, mode.refresh_rate,
+            )
+            self._is_fullscreen = True
+
+        # Defensive resync -- see docstring above.
+        fb_width, fb_height = glfw.get_framebuffer_size(self.window)
+        self.width, self.height = fb_width, fb_height
+        self._apply_viewport_and_projection()
 
     def begin_frame(self) -> None:
         """Clear the screen with the configured background color."""

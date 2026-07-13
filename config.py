@@ -47,3 +47,11 @@ FLOOR_COLOR: tuple = (0.13, 0.13, 0.17)
 # frame; InputHandler is what actually enforces this, using
 # Renderer.get_time() -- this is just the tunable value.
 MOVE_REPEAT_DELAY: float = 0.12
+
+# Fraction (0.0-1.0) of the window's tighter-fitting dimension the maze
+# should occupy. 0.90-0.95 leaves a comfortable, roughly-equal margin on
+# all sides while still filling most of the window. MazeRenderer
+# recomputes cell_size/margins from this every frame against the
+# Renderer's CURRENT width/height, so the maze stays correctly fitted and
+# centered through window resizes and fullscreen toggles.
+MAZE_FILL_FRACTION: float = 0.92

@@ -76,6 +76,34 @@ maze_project/
 
 
 ---
+## 🚀 Installation
+
+Clone the repository
+
+```bash
+git clone git@github.com:ParikchitSen/maze_project.git
+cd maze_project
+```
+
+Create a virtual environment
+
+```bash
+python3 -m venv venv
+source venv/bin/activate
+```
+
+Install dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+Run the project
+
+```bash
+python main.py
+```
+
 
 ## Controls
 

@@ -174,3 +174,19 @@ class InputHandler:
         movement polling change above -- restart is a one-shot action.
         """
         return self._just_pressed("R")
+
+    def is_fullscreen_toggle_requested(self) -> bool:
+        """
+        Return True exactly once, on the frame 'F11' is newly pressed.
+
+        Same shape as is_restart_requested() and for the same reason:
+        InputHandler only detects and reports the key-press edge -- it
+        does not call Renderer.toggle_fullscreen() itself. Toggling
+        fullscreen is an orchestration decision (main.py already holds
+        the Renderer reference and is the layer wiring input to actions
+        throughout this project), so main.py is what actually calls
+        renderer.toggle_fullscreen() when this returns True. Edge-triggered
+        (_just_pressed), not the movement polling mechanism -- holding F11
+        down must toggle fullscreen ONCE, not flicker every repeat interval.
+        """
+        return self._just_pressed("F11")

@@ -12,12 +12,12 @@ Design notes:
   (that's MazeRenderer). If you find yourself wanting to add an
   if-wall-blocked check or a glBegin/glEnd call here, it belongs in one of
   those modules instead, not here.
-- Config lives as module-level constants for now (rows/cols/cell_size/
-  margins). Easy to swap for config.py-driven values, CLI args, or a
-  settings menu later without touching the loop's structure. SEED is
-  intentionally None -- a fresh random maze every run, since a maze that's
-  identical every time gets boring fast. Pass a fixed int here temporarily
-  if you ever need a reproducible maze for debugging.
+- Config lives as module-level constants for now (rows/cols/window size).
+  Easy to swap for config.py-driven values, CLI args, or a settings menu
+  later without touching the loop's structure. SEED is intentionally
+  None -- a fresh random maze every run, since a maze that's identical
+  every time gets boring fast. Pass a fixed int here temporarily if you
+  ever need a reproducible maze for debugging.
 - No text-rendering library yet. Move count and elapsed time are shown in
   the WINDOW TITLE (via Renderer.set_title()) instead of drawn on-screen --
   the OS draws the title bar for free, so this is a simple way to surface
@@ -38,6 +38,14 @@ Design notes:
   immediately see "just pressed" again and could re-trigger a restart loop
   while the key is held. Reusing the same InputHandler (and simply
   reassigning its .game_state to the new one) avoids that.
+- Fullscreen ('F11') is a one-line call. main.py never touches GLFW,
+  never remembers window geometry, and never recomputes cell_size/margins
+  itself -- it just calls renderer.toggle_fullscreen() when InputHandler
+  reports F11 was pressed. Renderer owns everything about how the toggle
+  actually happens (glfw.set_window_monitor, preserving the GL context,
+  restoring windowed position/size); MazeRenderer owns re-fitting the maze
+  to whatever size the window ends up being, every frame, on its own --
+  main.py doesn't need to know a resize happened at all.
 """
 
 from engine.game_state import GameState
@@ -55,6 +63,7 @@ from config import (
     WALL_LIGHTING_THICKNESS,
     FLOOR_COLOR,
     MOVE_REPEAT_DELAY,
+    MAZE_FILL_FRACTION,
 )
 
 # Maze configuration. Swap these for config.py / CLI args later without
@@ -64,10 +73,13 @@ ROWS = 15
 COLS = 15
 SEED = None
 
-# Rendering configuration.
-CELL_SIZE = 40
-MARGIN_X = 20
-MARGIN_Y = 20
+# Rendering configuration. WINDOW_WIDTH/HEIGHT are only the STARTING
+# windowed-mode size -- MazeRenderer no longer takes a fixed cell_size or
+# margins; it derives both every frame from Renderer's current width/height
+# (see MazeRenderer._update_layout()), so the maze automatically re-fits
+# itself on any resize or fullscreen toggle without main.py doing anything.
+WINDOW_WIDTH = 800
+WINDOW_HEIGHT = 800
 WINDOW_TITLE = "Maze"
 
 
@@ -89,12 +101,12 @@ def main() -> None:
     # 1. Build the initial maze + gameplay state.
     maze, game_state = build_session()
 
-    # 2. Size the window to exactly fit the maze, then open it. Window
-    # dimensions depend only on ROWS/COLS/CELL_SIZE/MARGIN, none of which
-    # change on restart, so the window itself is created once.
-    width, height = MazeRenderer.compute_window_size(
-        rows=ROWS, cols=COLS, cell_size=CELL_SIZE, margin_x=MARGIN_X, margin_y=MARGIN_Y,
-    )
+    # 2. Open the window at a starting windowed-mode size. This is ONLY
+    # the initial size -- it has no special relationship to cell_size or
+    # the maze's dimensions anymore (see MazeRenderer._update_layout()),
+    # so there's nothing to compute here, just a fixed starting point that
+    # matches how the window looked before fullscreen/resize support.
+    width, height = WINDOW_WIDTH, WINDOW_HEIGHT
 
     with Renderer(width=width, height=height, title=WINDOW_TITLE) as renderer:
         # 3. Wrap the generated grid + game_state for drawing (maze walls,
@@ -102,9 +114,7 @@ def main() -> None:
         maze_renderer = MazeRenderer(
             renderer=renderer,
             grid=maze.grid,
-            cell_size=CELL_SIZE,
-            margin_x=MARGIN_X,
-            margin_y=MARGIN_Y,
+            fill_fraction=MAZE_FILL_FRACTION,
             game_state=game_state,
             wall_thickness=WALL_THICKNESS,
             wall_color=WALL_COLOR,
@@ -135,6 +145,15 @@ def main() -> None:
 
             # (1) Process input -- may call game_state.move_*() internally.
             input_handler.process_input()
+
+            # Fullscreen toggle: main.py only ever calls
+            # renderer.toggle_fullscreen() -- everything about HOW that
+            # actually happens (glfw.set_window_monitor, remembering/
+            # restoring windowed geometry, preserving the GL context)
+            # lives entirely in Renderer. InputHandler only reports that
+            # F11 was newly pressed; it has no GLFW knowledge itself.
+            if input_handler.is_fullscreen_toggle_requested():
+                renderer.toggle_fullscreen()
 
             # Restart: rebuild the maze + game_state locally (no globals),
             # then repoint the existing MazeRenderer/InputHandler at them.

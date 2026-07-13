@@ -51,6 +51,17 @@ Design notes (why it's built this way):
   This keeps the dependency arrow one-way: GameState -> MazeRenderer ->
   Renderer -> OpenGL. MazeRenderer depends on GameState's public
   read-only interface; GameState has no idea MazeRenderer exists.
+- Layout is DYNAMIC, recomputed every frame -- no fixed cell_size/margins.
+  cell_size, margin_x, and margin_y are no longer constructor inputs; they
+  are derived every time _update_layout() runs (called at the top of
+  every draw_*() method) from whatever Renderer.width/Renderer.height
+  currently are. Renderer is the one place that keeps width/height in
+  sync with the real window (including resizes and fullscreen toggles --
+  see engine/renderer.py); MazeRenderer just reads those fresh each draw
+  call and fits the maze to them, so resizing/fullscreen "just works" for
+  the maze without this file needing to know GLFW exists, and without
+  main.py needing to tell MazeRenderer anything happened. See
+  _update_layout() for the actual fit/center math.
 """
 
 from typing import List, Optional, Tuple
@@ -71,9 +82,7 @@ class MazeRenderer:
         self,
         renderer: Renderer,
         grid: List[List[Cell]],
-        cell_size: int = 40,
-        margin_x: int = 20,
-        margin_y: int = 20,
+        fill_fraction: float = 0.92,
         wall_color: Color = (0.78, 0.66, 0.48),
         wall_thickness: float = 8.0,
         wall_outline_color: Color = (0.30, 0.22, 0.14),
@@ -91,6 +100,9 @@ class MazeRenderer:
         if not grid or not grid[0]:
             raise ValueError("grid must be a non-empty 2D list of Cell objects")
 
+        if not (0.0 < fill_fraction <= 1.0):
+            raise ValueError("fill_fraction must be in the range (0.0, 1.0]")
+
         if not (0.0 < player_size_ratio <= 1.0):
             raise ValueError("player_size_ratio must be in the range (0.0, 1.0]")
 
@@ -103,9 +115,16 @@ class MazeRenderer:
         self.rows: int = len(grid)
         self.cols: int = len(grid[0])
 
-        self.cell_size: int = cell_size
-        self.margin_x: int = margin_x
-        self.margin_y: int = margin_y
+        # Fraction of the window's smaller-fitting dimension the maze
+        # should occupy (~0.90-0.95 reads as "fills the window with a
+        # comfortable margin"). cell_size/margin_x/margin_y are DERIVED
+        # from this + Renderer's current width/height every frame -- see
+        # _update_layout() -- rather than being fixed inputs.
+        self.fill_fraction: float = fill_fraction
+        self.cell_size: float = 0.0
+        self.margin_x: float = 0.0
+        self.margin_y: float = 0.0
+        self._update_layout()  # populate real values immediately
 
         # Base wall styling. wall_color is the flat "stone" fill color;
         # everything else here is what turns a flat rectangle into a
@@ -155,6 +174,46 @@ class MazeRenderer:
         """Multiply each channel of `color` by `factor`, clamped to [0, 1]."""
         return tuple(min(1.0, max(0.0, c * factor)) for c in color)  # type: ignore[return-value]
 
+    def _update_layout(self) -> None:
+        """
+        Recompute cell_size/margin_x/margin_y from Renderer's CURRENT
+        width/height. Called at the start of every draw_*() method (not
+        just once at construction) -- this is what makes "cell size
+        recalculated every frame using renderer dimensions" actually true,
+        and what makes the maze automatically respond to window resizes
+        and fullscreen toggles without main.py or Renderer needing to
+        tell this class anything happened.
+
+        The fit: cell_size is the LARGER of two candidate sizes -- one
+        that would fill fill_fraction of the window's width given `cols`
+        columns, one that would fill fill_fraction of the window's height
+        given `rows` rows -- whichever is SMALLER of those two candidates
+        is used (the tighter axis wins). That single scalar is used for
+        both width and height of every cell, so cells are always square
+        (no stretching), and since it's sized to the tighter axis, the
+        maze never overflows either dimension (no clipping).
+
+        The center: whatever space is left over after fitting the maze at
+        that cell_size is split evenly on each axis (divided by 2), which
+        centers the maze and keeps margins equal on opposite sides. If the
+        window is wider than the maze needs, that slack is horizontal, so
+        the maze ends up horizontally centered with equal left/right
+        margins (and vice versa for a taller window) -- this "which axis
+        gets centered" behavior falls out of the math automatically, no
+        separate orientation check is needed.
+        """
+        window_w, window_h = self.renderer.width, self.renderer.height
+
+        max_cell_w = (window_w * self.fill_fraction) / self.cols
+        max_cell_h = (window_h * self.fill_fraction) / self.rows
+        self.cell_size = min(max_cell_w, max_cell_h)
+
+        maze_w = self.cols * self.cell_size
+        maze_h = self.rows * self.cell_size
+
+        self.margin_x = (window_w - maze_w) / 2
+        self.margin_y = (window_h - maze_h) / 2
+
     # ------------------------------------------------------------------
     # Pixel-mapping helpers (public, reusable by future overlay renderers)
     # ------------------------------------------------------------------
@@ -189,24 +248,31 @@ class MazeRenderer:
 
     def total_pixel_size(self) -> Tuple[int, int]:
         """
-        Return the (width, height) in pixels needed to display this maze
-        with the configured cell_size and margins. Handy for sizing the
-        Renderer's window to exactly fit the maze instead of guessing.
+        Return the maze's CURRENT fitted pixel footprint (cols * cell_size,
+        rows * cell_size) at whatever cell_size _update_layout() last
+        computed. Note this is different from compute_window_size() below:
+        that staticmethod picks an INITIAL window size before any Renderer
+        exists (a chicken-and-egg problem solved by not needing an
+        instance); this instance method reports how much of the CURRENT
+        window the maze actually occupies, now that layout is dynamic and
+        window size drives maze size (not the other way around).
         """
-        return MazeRenderer.compute_window_size(
-            self.rows, self.cols, self.cell_size, self.margin_x, self.margin_y
-        )
+        return int(self.cols * self.cell_size), int(self.rows * self.cell_size)
 
     @staticmethod
     def compute_window_size(
         rows: int, cols: int, cell_size: int, margin_x: int, margin_y: int
     ) -> Tuple[int, int]:
         """
-        Compute the (width, height) in pixels a maze of this shape would
-        need, WITHOUT requiring a Renderer or MazeRenderer instance to
-        exist yet. This lets callers size their Renderer's window correctly
-        on the very first call, instead of picking an arbitrary width/height
-        and hoping it fits (see the __main__ block below).
+        Compute a reasonable STARTING window size for a maze of this shape,
+        WITHOUT requiring a Renderer or MazeRenderer instance to exist yet
+        (solves the chicken-and-egg problem of sizing a window before it's
+        created). Used by main.py exactly once, for the initial windowed
+        Renderer -- after that, MazeRenderer no longer depends on this
+        value at all: _update_layout() fits the maze to whatever the
+        window's ACTUAL size is every frame, including if the window is
+        later resized or toggled to fullscreen, regardless of whatever
+        cell_size/margins were used here to pick the starting size.
         """
         width = margin_x * 2 + cols * cell_size
         height = margin_y * 2 + rows * cell_size
@@ -231,6 +297,7 @@ class MazeRenderer:
         in any way. Call this BEFORE draw_maze() (see render()) so walls,
         goal, and player all draw on top of it.
         """
+        self._update_layout()
         for row in range(self.rows):
             for col in range(self.cols):
                 x, y = self.cell_to_pixel(row, col)
@@ -287,6 +354,7 @@ class MazeRenderer:
         where their segments sit) is exactly as before; only how a segment
         is painted, in _draw_wall_segment(), has changed.
         """
+        self._update_layout()
         t = self.wall_thickness
         half_t = t / 2
 
@@ -366,6 +434,7 @@ class MazeRenderer:
         if self.game_state is None:
             return
 
+        self._update_layout()
         row, col = self.game_state.goal_pos
         cx, cy = self.cell_center(row, col)
 
@@ -394,6 +463,7 @@ class MazeRenderer:
         if self.game_state is None:
             return
 
+        self._update_layout()
         row, col = self.game_state.player_pos
         pos = (row, col)
         if pos != self._last_player_pos:
@@ -485,9 +555,11 @@ if __name__ == "__main__":
     maze.generate()
     game_state = GameState(maze)  # player starts at (0, 0) by default
 
-    # Compute the exact window size this maze needs before the Renderer
-    # (and its window) is even created -- no dummy/placeholder instance
-    # required.
+    # Compute a reasonable STARTING window size before the Renderer (and
+    # its window) is even created -- no dummy/placeholder instance
+    # required. After this, MazeRenderer no longer needs cell_size/margin
+    # values at all -- it fits itself to whatever the window's real size
+    # is, every frame (see _update_layout()).
     width, height = MazeRenderer.compute_window_size(
         rows=maze.rows, cols=maze.cols, cell_size=CELL_SIZE, margin_x=MARGIN, margin_y=MARGIN
     )
@@ -496,9 +568,6 @@ if __name__ == "__main__":
         maze_renderer = MazeRenderer(
             renderer=renderer,
             grid=maze.grid,
-            cell_size=CELL_SIZE,
-            margin_x=MARGIN,
-            margin_y=MARGIN,
             game_state=game_state,
         )
 
